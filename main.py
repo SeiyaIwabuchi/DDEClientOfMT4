@@ -14,6 +14,7 @@ from forbiddenfruit import curse
 import threading
 import pickle
 import math
+import enum
 
 localDatetime:datetime.datetime = None
 
@@ -120,6 +121,8 @@ class MovingAverage:
     """
     グラフ表示を前提としたクラス
     """
+    SHORT_PERIOD = 20
+    LONG_PERIOD = 100
     def __init__(self,period:int):
         self.result:Dict[datetime.datetime,float] = {}
         self.period = period
@@ -139,6 +142,88 @@ class MovingAverage:
             self.result[candleList[len(candleList)-1].startTime] = sum/len(candleList)
         #print("Update MV now is {MVPrice}".format(MVPrice=self.result[len(self.result)-1] if len(self.result) >= 1 else None))
         #print(self.result)
+
+class stateMachine(enum.IntEnum):
+    """
+    ステート
+    """
+    noPosition = enum.auto()
+    havePosition = enum.auto()
+    beforeCross_AboveIsShort = enum.auto()
+    beforeCross_AboveIsLong = enum.auto()
+    afterCross = enum.auto()
+    beforeSettlement = enum.auto()
+    afterSettlement = enum.auto()
+    
+
+
+class TradingRobot:
+    """
+    #### １、移動平均線を使った自動トレード
+    ##### 概要
+    短期線が長期線を下に抜いた時はデッドクロスなので売り注文を行う。
+
+    逆に上に抜いた時はゴールデンクロスなので買い注文を行う。
+
+    この他に条件としてこの二つの線が交差したときの角度がどのくらい急かによっても判断する。
+    """
+    def __init__(self,period:datetime.timedelta):
+        self.positionState = stateMachine.noPosition
+        self.crossState = None
+        self.period:datetime.timedelta = period
+    def MAwatchman(self):
+        oldTickPrice = tick.nowPrice
+        oldState = None
+        while True:
+            if oldTickPrice != tick.nowPrice:
+                mv:MovingAverage
+                #MAshortNow = None
+                #MAlongNow = None
+                try:
+                    #以下のforループで今の長期、短期の平均移動線の確定値を取得する。
+                    for mv in mvDict[self.period]:
+                        if mv.period == MovingAverage.SHORT_PERIOD:
+                            MAshortNow = list(mv.result.values())[len(mv.result.values())-2]
+                        elif mv.period == MovingAverage.LONG_PERIOD:
+                            MAlongNow = list(mv.result.values())[len(mv.result.values())-2]
+                    #状態を更新する
+                    if MAlongNow > MAshortNow:
+                        self.crossState = stateMachine.beforeCross_AboveIsLong
+                        print("AboveIsLong")
+                    elif MAlongNow < MAshortNow:
+                        self.crossState = stateMachine.beforeCross_AboveIsShort
+                        print("AboveIsShort")
+                    else:
+                        print("MAlongNow == MAshortNow")
+                    #前の状態から変化した
+                    if oldState != self.crossState:
+                        #どのように変化したか
+                        if oldState == stateMachine.beforeCross_AboveIsLong:
+                            #長期戦のほうが上だったのが下になった→短期線のほうが上になった
+                            #ゴールデンクロス
+                            print("ゴールデンクロス")
+                            print("価格差:{}".format(MAshortNow-MAlongNow))
+                            returnCommand = MT4command.BUY
+                            self.positionState = stateMachine.havePosition
+                        elif oldState == stateMachine.beforeCross_AboveIsLong:
+                            #長期戦のほうが下だったのが上になった→短期線のほうが下になった
+                            #デッドクロス
+                            print("デッドクロス")
+                            print("価格差:{}".format(MAshortNow-MAlongNow))
+                            returnCommand = MT4command.SELL
+                            self.positionState = stateMachine.havePosition
+                        oldState = self.crossState
+                except IndexError:
+                    print("maWatcher passed")
+                    print("確定している移動平均線が{}のため".format(len(mvDict[self.period][0].result.values())-2))
+                oldTickPrice = tick.nowPrice
+            time.sleep(1)
+
+class MT4command(enum.IntEnum):
+    NOTHING = enum.auto()
+    BUY = enum.auto()
+    SELL = enum.auto() 
+    SETTLEMENT = enum.auto()
 
 def chartUpdate():
     time.sleep(3)
@@ -173,7 +258,7 @@ def chartUpdate():
                     try:
                         for mvObj in mvDict[candlePeriod]:
                                 mvObj.update(cm.candleSticks[candlePeriod])
-                                axList[index].plot(mdates.date2num(list(mvObj.result.keys())[len(cs)-60 if len(cs) >= 60 else 0:]),list(mvObj.result.values())[len(cs)-60 if len(cs) >= 60 else 0:])
+                                axList[index].plot(mdates.date2num(list(mvObj.result.keys())[len(list(mvObj.result.keys()))-60 if len(list(mvObj.result.keys())) >= 60 else 0:]),list(mvObj.result.values())[len(list(mvObj.result.values()))-60 if len(list(mvObj.result.values())) >= 60 else 0:])
                     except KeyError:
                         #print("Not found MA:{}".format(candlePeriod))
                         pass
@@ -240,6 +325,7 @@ app = Flask(__name__)
 tick = Tick()
 cm = CandleManager()
 mvDict:Dict[datetime.timedelta,List[MovingAverage]] = {}
+returnCommand = MT4command.NOTHING
 
 @app.route("/")
 def root():
@@ -263,7 +349,7 @@ def sendTick():
     tick.update(ask)
     #足の更新
     cm.tickUpdate()
-    return "OK"
+    return str(returnCommand)
 
 backTest = False
 
@@ -280,14 +366,18 @@ if __name__ == '__main__':
             cm.candleStickGenerator(CandleType.seconds30)
             cm.candleStickGenerator(CandleType.seconds5)
             mvDict[CandleType.seconds5] = []
-            mvDict[CandleType.seconds5].append(MovingAverage(20)) #5秒足の期間12の平均移動戦
-            mvDict[CandleType.seconds5].append(MovingAverage(100)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.seconds5].append(MovingAverage(MovingAverage.SHORT_PERIOD)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.seconds5].append(MovingAverage(MovingAverage.LONG_PERIOD)) #5秒足の期間12の平均移動戦
             mvDict[CandleType.seconds30] = []
-            mvDict[CandleType.seconds30].append(MovingAverage(20)) #5秒足の期間12の平均移動戦
-            mvDict[CandleType.seconds30].append(MovingAverage(100)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.seconds30].append(MovingAverage(MovingAverage.SHORT_PERIOD)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.seconds30].append(MovingAverage(MovingAverage.LONG_PERIOD)) #5秒足の期間12の平均移動戦
             mvDict[CandleType.minutes1] = []
-            mvDict[CandleType.minutes1].append(MovingAverage(20)) #5秒足の期間12の平均移動戦
-            mvDict[CandleType.minutes1].append(MovingAverage(100)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.minutes1].append(MovingAverage(MovingAverage.SHORT_PERIOD)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.minutes1].append(MovingAverage(MovingAverage.LONG_PERIOD)) #5秒足の期間12の平均移動戦
+        robot = TradingRobot(CandleType.seconds5)
+        maWatcher = threading.Thread(target=robot.MAwatchman)
+        maWatcher.daemon = True
+        maWatcher.start()
         stickProcess = threading.Thread(target=cm.stickCreate)
         stickProcess.daemon = True
         stickProcess.start()
