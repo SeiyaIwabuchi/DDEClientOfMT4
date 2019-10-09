@@ -13,6 +13,7 @@ import numpy as np
 from forbiddenfruit import curse
 import threading
 import pickle
+import math
 
 localDatetime:datetime.datetime = None
 
@@ -99,10 +100,10 @@ class CandleManager:
                         #今の足をクローズする
                         tmpStick.closing = tick.nowPrice
                         tmpStick.close()
-                        tmpStick.print()
+                        #tmpStick.print()
                         #足リストに新しく足を追加する
                         sticks.append(CandleStick(tmpStick.period,high=tick.nowPrice,low=tick.nowPrice,opening=tick.nowPrice,closeing=tick.nowPrice))
-                        print("newStick:{}".format(tmpStick.period))
+                        #print("newStick:{}".format(tmpStick.period))
             time.sleep(1)
     
     def candleStickGenerator(self,period:datetime.timedelta):
@@ -116,53 +117,76 @@ class Tick:
         self.nowPrice = price
 
 class MovingAverage:
+    """
+    グラフ表示を前提としたクラス
+    """
     def __init__(self,period:int):
-        self.result = []
+        self.result:Dict[datetime.datetime,float] = {}
         self.period = period
     
     def update(self,candleList):
-        if len(candleList) >= 20:
+        #print("Update MA")
+        candleList:List[CandleStick]
+        if len(candleList) >= self.period:
             sum = 0
             for cand in candleList[len(candleList)-self.period:]:
                 sum += cand.closing
-            self.result.append(sum/self.period)
-        print("Update MV now is {MVPrice}".format(MVPrice=self.result[len(self.result)-1] if len(self.result) >= 1 else None))
+            self.result[candleList[len(candleList)-1].startTime] = sum/self.period
+        elif len(candleList) < self.period:
+            sum = 0
+            for cand in candleList:
+                sum += cand.closing
+            self.result[candleList[len(candleList)-1].startTime] = sum/len(candleList)
+        #print("Update MV now is {MVPrice}".format(MVPrice=self.result[len(self.result)-1] if len(self.result) >= 1 else None))
+        #print(self.result)
 
 def chartUpdate():
-    time.sleep(1)
-    fig, (ax1,ax2) = plt.subplots(ncols=2,figsize=(14,10))
+    time.sleep(3)
+    fig, axtap = plt.subplots(ncols=len(cm.candleSticks),figsize=(16,9),dpi=120,num=1)
+    oldTickPrice = tick.nowPrice
+    oldUpdateTime = datetime.datetime.now()
     while True:
-        oldTickPrice = tick.nowPrice
-        if oldTickPrice != tick.nowPrice:
+        if oldTickPrice != tick.nowPrice or datetime.datetime.now() >= oldUpdateTime + datetime.timedelta(seconds=5):
 
             oldTickPrice = tick.nowPrice
+            oldUpdateTime = datetime.datetime.now()
 
-            plt.cla()
-            plt.clf()
-            plt.close()
-
-            fig, axtap = plt.subplots(ncols=len(cm.candleSticks),figsize=(14,10))
+            #plt.cla()            
+            #plt.clf()
+            #plt.close()
+            fig, axtap = plt.subplots(ncols=len(cm.candleSticks),figsize=(16,9),clear=True,dpi=110,num=1)
 
             axList = list(axtap)
             dataList = []
 
-            print(axList)
+            candlePeriod:datetime.timedelta
 
-            for index,(candlePeriod,candleStick) in enumerate(cm.candleSticks.items()):
-                print("index:{}".format(index))
+            for index,(candlePeriod,candleSticks) in enumerate(cm.candleSticks.items()):
                 cs:List[CandleStick] = cm.candleSticks[candlePeriod]
-                cs = cs[len(cs)-120 if len(cs) >= 120 else 0:]
+                cs = cs[len(cs)-60 if len(cs) >= 60 else 0:]
                 dataList.append(list())
                 for t in cs:
                     tms = [mdates.date2num(t.startTime),t.opening,t.high,t.low,t.closing]
                     dataList[len(dataList)-1].append(tms)
-                mpl_finance.candlestick_ohlc(axList[index], dataList[len(dataList)-1], width=0.00003, alpha=0.5, colorup='b', colordown='r')
-                axList[index].xaxis_date()
-                axList[index].xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M:%S"))
-                axList[index].grid(True)
-                axList[index].set_xlabel("Date")
-                axList[index].set_ylabel("Price")
-                #axList[index].set_title("USD-JPY {} {}".format(datetime.datetime.now()))
+                try:
+                    mpl_finance.candlestick_ohlc(axList[index], dataList[len(dataList)-1], width=candlePeriod.total_seconds()/1.5/pow(10,5), alpha=0.5, colorup='b', colordown='r')
+                    try:
+                        for mvObj in mvDict[candlePeriod]:
+                                mvObj.update(cm.candleSticks[candlePeriod])
+                                axList[index].plot(mdates.date2num(list(mvObj.result.keys())[len(cs)-60 if len(cs) >= 60 else 0:]),list(mvObj.result.values())[len(cs)-60 if len(cs) >= 60 else 0:])
+                    except KeyError:
+                        #print("Not found MA:{}".format(candlePeriod))
+                        pass
+                    axList[index].xaxis_date()
+                    axList[index].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+                    #axList[index].grid(True)
+                    axList[index].set_xlabel("Date")
+                    axList[index].set_ylabel("Price")
+                    axList[index].set_title("USD-JPY {}:{}:{}".format(int(candlePeriod.total_seconds()//3600),int(candlePeriod.total_seconds()//60),int(candlePeriod.total_seconds()%60)))
+                    axList[index].frameon = True
+                except TypeError:
+                    #print("Skip figure draw.")
+                    pass
 
             """cs1:List[CandleStick] = cm.candleSticks[CandleType.seconds5]
             cs1 = cs1[len(cs1)-120 if len(cs1) >= 120 else 0:]
@@ -195,7 +219,8 @@ def chartUpdate():
             ax2.set_ylabel("Price")
             ax2.set_title("USD-JPY {} {}".format("1min",datetime.datetime.now()))"""
 
-            plt.pause(1)
+
+        plt.pause(0.001)
 
 def setLocalDatetime(datetimeText):
     global localDatetime
@@ -214,6 +239,7 @@ def runLocalDatetime():
 app = Flask(__name__)
 tick = Tick()
 cm = CandleManager()
+mvDict:Dict[datetime.timedelta,List[MovingAverage]] = {}
 
 @app.route("/")
 def root():
@@ -230,9 +256,9 @@ def sendTick():
     datetimeText = datetimeText.replace("%20"," ")
     setLocalDatetime(datetimeText)
 
-    print("Receive Tick:{datetime}".format(datetime=datetime.datetime.now()))
-    print("ASK:{ask}".format(ask=ask))
-    print("BID:{bid}".format(bid=bid))
+    #print("Receive Tick:{datetime}".format(datetime=datetime.datetime.now()))
+    #print("ASK:{ask}".format(ask=ask))
+    #print("BID:{bid}".format(bid=bid))
     #システム側のティックを更新
     tick.update(ask)
     #足の更新
@@ -251,8 +277,17 @@ if __name__ == '__main__':
                 cm = pickle.load(bin)
         except FileNotFoundError:
             cm.candleStickGenerator(CandleType.minutes1)
-            #cm.candleStickGenerator(CandleType.hours1)
+            cm.candleStickGenerator(CandleType.seconds30)
             cm.candleStickGenerator(CandleType.seconds5)
+            mvDict[CandleType.seconds5] = []
+            mvDict[CandleType.seconds5].append(MovingAverage(20)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.seconds5].append(MovingAverage(100)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.seconds30] = []
+            mvDict[CandleType.seconds30].append(MovingAverage(20)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.seconds30].append(MovingAverage(100)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.minutes1] = []
+            mvDict[CandleType.minutes1].append(MovingAverage(20)) #5秒足の期間12の平均移動戦
+            mvDict[CandleType.minutes1].append(MovingAverage(100)) #5秒足の期間12の平均移動戦
         stickProcess = threading.Thread(target=cm.stickCreate)
         stickProcess.daemon = True
         stickProcess.start()
